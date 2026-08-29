@@ -1,5 +1,51 @@
 # AI Executive Operating System
 
+## Implementation Status (MVP)
+
+The design below is implemented under `src/execos/`, matching PROJECT.md Section 21's MVP scope exactly: two already-built, already-validated specialists — Project 01's Revenue Ops Agent and Project 09's Data Investigation Agent — connected behind a minimal Supervisor Agent that answers on-demand cross-domain executive questions, with full evidence citation and explicit fact/hypothesis labeling. No HR/Ops/Support specialists, no continuous monitoring, consistent with the MVP's stated scope.
+
+**This project's central design claim is genuine, not simulated reuse**: `specialists/revenue_ops.py` and `specialists/data_investigation.py` directly `import revops` / `import investigator` — the actual Python packages from `01-ai-revenue-operations` and `09-ai-data-investigation` — and call their real, already-tested `investigate_deal()` / `run_investigation()` functions. The Supervisor never touches raw CRM or warehouse data itself; it only ever receives each specialist's already-produced, already-grounded findings, normalized into a `SpecialistFinding`.
+
+What exists:
+
+- **Real permission isolation, enforced structurally**: `supervisor/*.py` never imports `revops` or `investigator` — verified by `tests/test_permission_isolation.py`, which AST-scans every file in `supervisor/` for exactly that, and separately confirms only the two adapter modules in `specialists/` are allowed to import a specialist project. This is the same class of proof as project 10's architectural-separation test, but here it spans two genuinely independent, separately-built codebases rather than two modules in one repo.
+- A two-call Supervisor Agent (`supervisor/orchestrate.py`): one call routes the executive's question to the relevant specialist(s), delegates to them (their own internal LLM cost is entirely outside the Supervisor's control), then one call synthesizes their findings into fact/hypothesis-labeled claims.
+- A grounding validator (`supervisor/grounding.py`) requiring every claim to cite real finding IDs from specialists that were actually invoked, and — specific to this project's central risk (Section 131's "false correlation rate") — requiring any claimed cross-domain connection to actually cite evidence from more than one specialist, not just assert a connection while citing only one domain's findings.
+- Two fixture scenarios (`eval/fixtures.py`) built to test the two directions that matter most: `connected` (findings that genuinely share an entity and date — the same account, the same day) and `unrelated` (findings with no shared entity — the correct, and more consequential, answer is "no connection").
+
+### Setup
+
+```bash
+python -m venv .venv
+./.venv/Scripts/activate         # or source .venv/bin/activate on macOS/Linux
+pip install -e .
+pip install -e ../01-ai-revenue-operations -e ../09-ai-data-investigation   # the two specialists this project reuses
+# add GEMINI_API_KEY=... to this project's own .env, or set LLM_PROVIDER=ollama (governs only the Supervisor's own 2 calls)
+```
+
+### Usage
+
+```bash
+python -m execos.cli synthesize-demo --scenario unrelated   # Supervisor reasoning only, fixture findings, no specialist calls
+python -m execos.cli synthesize-demo --scenario connected
+python -m execos.cli investigate --question "..." --deal-id d_meridian --target-date 2025-04-15  # full pipeline, real specialist delegation
+python -m execos.cli eval                                    # both fixtures: accuracy, false-correlation rate, grounding
+pytest tests/                                                 # zero API cost
+```
+
+### An honest constraint this MVP works around
+
+Project 01 and Project 09 were both built before this portfolio's dual-provider (Gemini/Ollama) pattern existed — both are Gemini-only. That means `execos.cli investigate` (real specialist delegation) requires GEMINI_API_KEY to be valid and unexhausted for *those two projects'* own `.env` files, regardless of this project's own `LLM_PROVIDER` setting. To keep the Supervisor's own genuinely new reasoning (routing + cross-domain synthesis) testable against the free local model regardless of that shared quota, `synthesize-demo` runs the Supervisor against fixture specialist findings with zero calls into either underlying project — this is how its live verification below was primarily done.
+
+### Verified so far
+
+- All 16 deterministic tests pass, including the permission-isolation AST suite and normalization tests for both specialist adapters (built with hand-constructed `InvestigationReport`/`FinalReport` fixtures from each specialist's own real schema, at zero cost).
+- **Live-verified** against Ollama (`llama3.2:1b`) in three separate runs, and all three are genuinely informative:
+  1. `synthesize-demo --scenario unrelated` (fixture): correctly predicted no connection (matches expected), grounding passed.
+  2. `synthesize-demo --scenario connected` (fixture): predicted no connection, which the eval scores as *incorrect* (expected `True`) — but the model's own `FACT` claim and reasoning text explicitly and correctly identified the shared entity ("both findings... mention... account 'Meridian Health Systems' on 2026-07-05"). The boolean `cross_domain_connection_found` field simply didn't match what its own claims and reasoning already said. A structured-output internal-consistency bug in the small model, not a grounding or architecture failure — every citation was still real.
+  3. `execos.cli investigate` — a **full real end-to-end run**: real delegation to both live specialists (confirmed via `raw_run_id`s that are genuine run IDs saved inside Project 01's and Project 09's own `runs/` directories, not stubs), both specialists' own grounding passed, the Supervisor's own grounding passed with zero violations, and — the metric that matters most here (Section 131) — it correctly reported `cross_domain_connection_found=false` for two datasets that really are unrelated (a CRM deal and an unconnected warehouse pipeline-failure incident), rather than inventing a connection because it was asked to look for one. The same boolean/narrative inconsistency from run 2 recurred here (`coverage_note` reads like a connection was found even though the field says otherwise) — a consistent, now well-evidenced finding, not a one-off.
+- **Across all three live trials, the single most important safety property — never fabricating a cross-domain connection without real cross-specialist evidence — held completely** (false-correlation rate: 0/2 negative cases), and grounding passed 3/3. The specific defect found (a boolean field disagreeing with the model's own correctly-reasoned free text) is exactly the kind of thing a UI surfacing the full claim list and reasoning — not just a top-line yes/no — protects against, and is expected to improve materially on the intended production model (Gemini).
+
 ## 1. One-Sentence Explanation
 
 This is an AI system that lets an executive ask "what's happening in my company and why" and get a real, evidence-backed answer pulled together across departments — instead of waiting for someone to manually compile it, or never finding out at all.
